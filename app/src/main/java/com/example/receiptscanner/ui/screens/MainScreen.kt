@@ -1,5 +1,6 @@
 package com.example.receiptscanner.ui.screens
 
+import android.content.Context
 import kotlinx.serialization.json.*
 import java.time.format.DateTimeFormatter
 import android.widget.Toast
@@ -17,12 +18,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.datastore.dataStore
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
 import com.example.receiptscanner.ui.components.AnthropicApiService
 import com.example.receiptscanner.ui.components.CurrencySettingsDialog
 import com.example.receiptscanner.ui.components.ImagePickerBottomSheet
 import com.example.receiptscanner.ui.components.ManualEntryDialog
 import java.time.LocalDateTime
 import java.util.*
+
 
 
 import com.example.receiptscanner.ui.components.Transaction
@@ -33,6 +39,7 @@ import com.example.receiptscanner.ui.components.calculateMonthTotal
 import com.example.receiptscanner.ui.components.calculateWeekTotal
 import com.example.receiptscanner.ui.components.formatAmount
 import com.example.receiptscanner.ui.components.toSearchableText
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 
@@ -40,7 +47,20 @@ import kotlinx.coroutines.launch
 val DarkGreen = Color(0xFF006400)
 val ExpenseRed = Color(0xFFB22222)
 
+object ApiKeyPreferences {
+    private val Context.apiKeyDataStore by preferencesDataStore(name = "api_key_settings")
+    private val API_KEY = stringPreferencesKey("api_key")
 
+    suspend fun saveApiKey(context: Context, apiKey: String) {
+        context.apiKeyDataStore.edit { preferences ->
+            preferences[API_KEY] = apiKey
+        }
+    }
+
+    suspend fun getApiKey(context: Context): String {
+        return context.apiKeyDataStore.data.first()[API_KEY] ?: ""
+    }
+}
 
 val supportedCurrencies = listOf(
     "USD" to Locale.US,
@@ -50,6 +70,8 @@ val supportedCurrencies = listOf(
 
 @Composable
 fun MainReceiptScanner(transactionsRepository: TransactionsRepository) {
+    var apiKey by remember { mutableStateOf("") }
+
     var searchQuery by remember { mutableStateOf("") }
     var isSettingsOpen by remember { mutableStateOf(false) }
     var selectedLocale by remember { mutableStateOf(Locale("en", "IN")) }
@@ -59,6 +81,7 @@ fun MainReceiptScanner(transactionsRepository: TransactionsRepository) {
     var showDeleteConfirmation by remember { mutableStateOf<Transaction?>(null) }
 
 
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     // Collect transactions from DataStore
@@ -67,6 +90,10 @@ fun MainReceiptScanner(transactionsRepository: TransactionsRepository) {
     // Initialize sample data on first launch (then save in datastore)
     LaunchedEffect(Unit) {
         transactionsRepository.initializeWithSampleData()
+    }
+
+    LaunchedEffect(Unit) {
+        apiKey = ApiKeyPreferences.getApiKey(context)
     }
 
 
@@ -126,6 +153,13 @@ fun MainReceiptScanner(transactionsRepository: TransactionsRepository) {
             scope.launch {
                 transactionsRepository.clearAndResetData()
             }
+        },
+        apiKey = apiKey,
+        onApiKeyChange = { newKey ->
+            apiKey = newKey
+            scope.launch {
+                ApiKeyPreferences.saveApiKey(context, newKey)
+            }
         }
     )
 
@@ -183,7 +217,9 @@ fun ReceiptScannerScreen(
     onDeleteConfirmationChange: (Transaction?) -> Unit,
     onDeleteTransaction: (Transaction) -> Unit,
     onTransactionAdded: (Transaction) -> Unit,
-    onClearData: () -> Unit
+    onClearData: () -> Unit,
+    apiKey: String,
+    onApiKeyChange: (String) -> Unit
 ) {
     Scaffold(
         topBar = {
@@ -195,7 +231,7 @@ fun ReceiptScannerScreen(
                 thisWeekTotal = thisWeekTotal,
                 selectedLocale = selectedLocale,
                 onAddTransactionClick = { onManualEntryOpenChange(true) },
-                onAutoTransactionAdded = onTransactionAdded
+                onAutoTransactionAdded = onTransactionAdded,
             )
         },
 
@@ -215,7 +251,9 @@ fun ReceiptScannerScreen(
         onDismiss = { onSettingsOpenChange(false) },
         selectedLocale = selectedLocale,
         onLocaleSelected = onLocaleSelected,
-        onClearData = onClearData
+        onClearData = onClearData,
+        apiKey = apiKey,
+        onApiKeyChange = onApiKeyChange
     )
 
     // Manual Entry Dialog for new transactions
@@ -258,8 +296,11 @@ fun ReceiptScannerTopBar(
     thisWeekTotal: Double,
     selectedLocale: Locale,
     onAddTransactionClick: () -> Unit,
-    onAutoTransactionAdded: (Transaction) -> Unit
+    onAutoTransactionAdded: (Transaction) -> Unit,
 ) {
+    var uploadProgress by remember { mutableStateOf(0f) }
+    var isLoading by remember { mutableStateOf(false) }
+
     var showAddMenu by remember { mutableStateOf(false) }
     var showImagePicker by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -267,9 +308,16 @@ fun ReceiptScannerTopBar(
 
     ImagePickerBottomSheet(
         show = showImagePicker,
-        onDismiss = { showImagePicker = false },
+        onDismiss = {
+            showImagePicker = false
+            uploadProgress = 0f
+            isLoading = false
+        },
         onImageSelected = { uri ->
-            val result = anthropicService.analyzeReceiptImage(uri)
+            isLoading = true
+            val result = anthropicService.analyzeReceiptImage(uri) { progress ->
+                uploadProgress = progress
+            }
             println(result)
 
             // Toast.makeText(context, result, Toast.LENGTH_LONG).show()
@@ -347,6 +395,9 @@ fun ReceiptScannerTopBar(
 
             } catch (e: Exception) {
                 Toast.makeText(context, "Error parsing receipt: ${e.message}", Toast.LENGTH_LONG).show()
+                uploadProgress = 0f
+            } finally {
+                isLoading = false
             }
         }
     )
@@ -410,6 +461,46 @@ fun ReceiptScannerTopBar(
             searchQuery = searchQuery,
             onSearchQueryChange = onSearchQueryChange
         )
+
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+        ) {
+            if (isLoading) {  // Single condition for the Box content
+                if (uploadProgress > 0 && uploadProgress < 1) {
+                    // Show determinate progress when we have a progress value
+                    LinearProgressIndicator(
+                        progress = uploadProgress,
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                } else {
+                    // Show indeterminate progress when loading but no progress value
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                // Spinner overlay
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 20.dp, top = 20.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        strokeWidth = 2.dp
+                    )
+                }
+            }
+        }
+
+
+
     }
 }
 

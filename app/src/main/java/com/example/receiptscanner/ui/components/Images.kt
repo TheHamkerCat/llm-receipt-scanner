@@ -64,12 +64,18 @@ import java.io.IOException
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import com.example.receiptscanner.BuildConfig
+import android.util.Log
+import com.example.receiptscanner.ui.screens.ApiKeyPreferences
 import java.io.ByteArrayOutputStream
 
-class AnthropicApiService(private val context: Context) {
+class AnthropicApiService(
+    private val context: Context,
+) {
     private val client = OkHttpClient()
-    private val apiKey =  BuildConfig.ANTHROPIC_API_KEY
+
+    private suspend fun getCurrentApiKey(): String {
+        return ApiKeyPreferences.getApiKey(context)
+    }
 
     private fun compressImage(uri: Uri): String {
         // Get original bitmap
@@ -109,62 +115,141 @@ class AnthropicApiService(private val context: Context) {
         return Base64.encodeToString(byteArray, Base64.NO_WRAP)
     }
 
-    suspend fun analyzeReceiptImage(imageUri: Uri): String {
+    private fun isAnthropicKey(apiKey: String): Boolean {
+        return apiKey.startsWith("sk-ant")
+    }
+
+    private fun createAnthropicRequest(base64Image: String, apiKey: String): Request {
+        val jsonBody = JSONObject().apply {
+            put("model", "claude-3-5-sonnet-20241022")
+            put("max_tokens", 4000)
+            put("messages", JSONArray().put(
+                JSONObject().apply {
+                    put("role", "user")
+                    put("content", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("type", "image")
+                            put("source", JSONObject().apply {
+                                put("type", "base64")
+                                put("media_type", "image/jpeg")
+                                put("data", base64Image)
+                            })
+                        })
+                        put(JSONObject().apply {
+                            put("type", "text")
+                            put("text", """
+                            You need to extract data from this receipt and return it as json
+                            {
+                                "description": "2-3 words description about this receipt, like the restaurant/business name, or the type of spending",
+                                "totalAmount": Final grand total amount of the bill, int,
+                                "addressLocation": "address of this merchant or restaurant",
+                                "phoneNumberOfMerchant": "phone number of this merchant or business or anything",
+                                "timestamp": "date and time of bill in 'DD/MM/YYYY HH:MM:SS' format",
+                                "items": [
+                                    {"some line item name": costInt}
+                                ]
+                             }
+                             Keep field empty if not available but don't fill false info, Also, Please don't include any explanation, advices or any other text before and after json in your response.
+                             Your response should only be json and will be parsed directly, please do not include any backticks or markdown like ```json, just directly output json
+                             PLEASE DO NOT HALLUCINATE ANY INFO, ONLY WRITE WHAT IS THERE IN THE RECEIPT, IF NO RECEIPT, THEN RETURN EMPTY VALUES BUT RETURN KEYS
+                            """.trimIndent())
+                        })
+                    })
+                }
+            ))
+        }
+
+        return Request.Builder()
+            .url("https://api.anthropic.com/v1/messages")
+            .addHeader("x-api-key", apiKey)
+            .addHeader("anthropic-version", "2023-06-01")
+            .addHeader("content-type", "application/json")
+            .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+    }
+
+    private fun createOpenAIRequest(base64Image: String, apiKey: String): Request {
+        val jsonBody = JSONObject().apply {
+            put("model", "gpt-4o")
+            put("messages", JSONArray().put(
+                JSONObject().apply {
+                    put("role", "user")
+                    put("content", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("type", "text")
+                            put("text", """
+                            You need to extract data from this receipt and return it as json
+                            {
+                                "description": "2-3 words description about this receipt, like the restaurant/business name, or the type of spending",
+                                "totalAmount": Final grand total amount of the bill, int,
+                                "addressLocation": "address of this merchant or restaurant",
+                                "phoneNumberOfMerchant": "phone number of this merchant or business or anything",
+                                "timestamp": "date and time of bill in 'DD/MM/YYYY HH:MM:SS' format",
+                                "items": [
+                                    {"some line item name": costInt}
+                                ]
+                             }
+                            Keep field empty if not available but don't fill false info, Also, Please don't include any explanation, advices or any other text before and after json in your response.
+                            Your response should only be json and will be parsed directly, please do not include any backticks or markdown like ```json, just directly output json
+                            your answer should start with opening curly brace "{" and end with closing curly brace "}"
+                            PLEASE DO NOT HALLUCINATE ANY Receipt INFO, ONLY WRITE WHAT IS THERE IN THE RECEIPT, IF NO RECEIPT, THEN RETURN EMPTY VALUES BUT RETURN KEYS
+                            """.trimIndent())
+                        })
+                        put(JSONObject().apply {
+                            put("type", "image_url")
+                            put("image_url", JSONObject().apply {
+                                put("url", "data:image/jpeg;base64,$base64Image")
+                            })
+                        })
+                    })
+                }
+            ))
+            put("max_tokens", 4000)
+        }
+
+        return Request.Builder()
+            .url("https://api.openai.com/v1/chat/completions")
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+    }
+
+    private fun parseResponse(responseBody: String, isAnthropicApi: Boolean): String {
+        return if (isAnthropicApi) {
+            val jsonResponse = JSONObject(responseBody)
+            jsonResponse.getJSONArray("content").getJSONObject(0).getString("text")
+        } else {
+            val jsonResponse = JSONObject(responseBody)
+            jsonResponse.getJSONArray("choices").getJSONObject(0)
+                .getJSONObject("message").getString("content")
+        }
+    }
+
+    suspend fun analyzeReceiptImage(imageUri: Uri, onProgress: (Float) -> Unit): String {
         return withContext(Dispatchers.IO) {
             try {
+                onProgress(0.1f)
                 val base64Image = compressImage(imageUri)
-                val jsonBody = JSONObject().apply {
-                    put("model", "claude-3-5-sonnet-20241022")
-                    put("max_tokens", 4000)
-                    put("messages", JSONArray().put(
-                        JSONObject().apply {
-                            put("role", "user")
-                            put("content", JSONArray().apply {
-                                put(JSONObject().apply {
-                                    put("type", "image")
-                                    put("source", JSONObject().apply {
-                                        put("type", "base64")
-                                        put("media_type", "image/jpeg")
-                                        put("data", base64Image)
-                                    })
-                                })
-                                put(JSONObject().apply {
-                                    put("type", "text")
-                                    put("text", """
-You need to extract data from this receipt and return it as json
+                onProgress(0.3f)
 
-{
-    "description": "2-3 words description about this receipt, like the restaurant/business name, or the type of spending",
-    "totalAmount": Final grand total amount of the bill, int,
-    "addressLocation": "address of this merchant or restaurant",
-    "phoneNumberOfMerchant": "phone number of this merchant or business or anything",
-    "timestamp": "date and time of bill in 'DD/MM/YYYY HH:MM:SS' format",
-    "items": [
-        {"some line item name": costInt}
-    ]
- }
-
-Keep field empty if not available but don't fill false info, Also, Please don't include any other text or advices before and after json in your response.
-Your response should only be json
-PLEASE DO NOT HALLUCINATE ANY INFO, ONLY WRITE WHAT IS THERE IN THE RECEIPT, IF NO RECEIPT, THEN RETURN EMPTY VALUES BUT RETURN KEYS
-""".trimIndent())
-                                })
-                            })
-                        }
-                    ))
+                val apiKey = getCurrentApiKey()
+                if (apiKey.isBlank()) {
+                    throw Exception("Please set your API key in settings")
                 }
 
-                val request = Request.Builder()
-                    .url("https://api.anthropic.com/v1/messages")
-                    .addHeader("x-api-key", apiKey)
-                    .addHeader("anthropic-version", "2023-06-01")
-                    .addHeader("content-type", "application/json")
-                    .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-                    .build()
+                val isAnthropicApi = isAnthropicKey(apiKey)
+                val request = if (isAnthropicApi) {
+                    createAnthropicRequest(base64Image, apiKey)
+                } else {
+                    createOpenAIRequest(base64Image, apiKey)
+                }
 
-                println(request)
+                onProgress(0.7f)
 
                 client.newCall(request).execute().use { response ->
+                    onProgress(0.9f)
+
                     if (!response.isSuccessful) {
                         val errorMessage = "API call failed: ${response.code} ${response.message}"
                         println(errorMessage)
@@ -179,46 +264,34 @@ PLEASE DO NOT HALLUCINATE ANY INFO, ONLY WRITE WHAT IS THERE IN THE RECEIPT, IF 
                     }
 
                     val responseBody = response.body?.string() ?: throw Exception("Empty response")
-                    val jsonResponse = JSONObject(responseBody)
-                    val content = jsonResponse.getJSONArray("content").getJSONObject(0)
-                    return@withContext content.getString("text")
+                    onProgress(1.0f)
+                    return@withContext parseResponse(responseBody, isAnthropicApi)
                 }
-            } catch (e: OutOfMemoryError) {
-                val errorMessage = "Image is too large to process"
-                println(errorMessage)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
-                }
-                return@withContext errorMessage
-            } catch (e: SecurityException) {
-                val errorMessage = "Permission denied to access image"
-                println(errorMessage)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
-                }
-                return@withContext errorMessage
-            } catch (e: FileNotFoundException) {
-                val errorMessage = "Image file not found"
-                println(errorMessage)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
-                }
-                return@withContext errorMessage
-            } catch (e: IOException) {
-                val errorMessage = "Network error: ${e.message}"
-                println(errorMessage)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
-                }
-                return@withContext errorMessage
             } catch (e: Exception) {
-                val errorMessage = "Error analyzing receipt: ${e.message}"
-                println(errorMessage)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
+                handleError(e)
+                onProgress(0f)
+                return@withContext when (e) {
+                    is OutOfMemoryError -> "Image is too large to process"
+                    is SecurityException -> "Permission denied to access image"
+                    is FileNotFoundException -> "Image file not found"
+                    is IOException -> "Network error: ${e.message}"
+                    else -> "Error analyzing receipt: ${e.message}"
                 }
-                return@withContext errorMessage
             }
+        }
+    }
+
+    private suspend fun handleError(e: Exception) {
+        withContext(Dispatchers.Main) {
+            val errorMessage = when (e) {
+                is OutOfMemoryError -> "Image is too large to process"
+                is SecurityException -> "Permission denied to access image"
+                is FileNotFoundException -> "Image file not found"
+                is IOException -> "Network error: ${e.message}"
+                else -> "Error analyzing receipt: ${e.message}"
+            }
+            println(errorMessage)
+            Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
         }
     }
 }

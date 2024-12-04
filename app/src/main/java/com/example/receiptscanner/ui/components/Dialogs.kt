@@ -22,10 +22,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +48,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.receiptscanner.ui.screens.DarkGreen
@@ -61,10 +66,13 @@ fun CurrencySettingsDialog(
     onDismiss: () -> Unit,
     selectedLocale: Locale,
     onLocaleSelected: (Locale) -> Unit,
-    onClearData: () -> Unit
+    onClearData: () -> Unit,
+    apiKey: String,
+    onApiKeyChange: (String) -> Unit
 ) {
     if (isOpen) {
         var showConfirmDialog by remember { mutableStateOf(false) }
+        var isApiKeyVisible by remember { mutableStateOf(false) }
 
         // Main Settings Dialog
         AlertDialog(
@@ -78,6 +86,44 @@ fun CurrencySettingsDialog(
                         .padding(vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
+                    if (apiKey.isNotEmpty()) {
+                        OutlinedTextField(
+                            value = apiKey,
+                            onValueChange = onApiKeyChange,
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("API Key") },
+                            visualTransformation = if (isApiKeyVisible) {
+                                VisualTransformation.None
+                            } else {
+                                PasswordVisualTransformation('•')
+                            },
+                            trailingIcon = {
+                                IconButton(onClick = { isApiKeyVisible = !isApiKeyVisible }) {
+                                    Icon(
+                                        imageVector = if (isApiKeyVisible)
+                                            Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = if (isApiKeyVisible)
+                                            "Hide API Key" else "Show API Key"
+                                    )
+                                }
+                            },
+//                            singleLine = true
+                        )
+                    } else {
+                        OutlinedTextField(
+                            value = apiKey,
+                            onValueChange = onApiKeyChange,
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("API Key") },
+                            placeholder = { Text("Enter your Claude Or OpenAI API key") },
+//                            singleLine = true
+                        )
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+
+
                     // Currency section
                     Text(
                         "Currency Settings",
