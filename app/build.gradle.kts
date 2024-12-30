@@ -9,9 +9,6 @@ plugins {
 }
 
 
-val keystoreProperties = Properties().apply {
-    load(FileInputStream(rootProject.file("keystore.properties")))
-}
 
 android {
     namespace = "com.example.receiptscanner"
@@ -25,8 +22,6 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        buildConfigField("String", "ANTHROPIC_API_KEY", "\"${keystoreProperties.getProperty("ANTHROPIC_API_KEY", "")}\"")
     }
 
     buildFeatures {
